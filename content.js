@@ -1,6 +1,9 @@
 const SESSION_KEY = 'fullyframe_active';
 const OVERLAY_URL_KEY = 'overlayUrl';
 const OVERLAY_ATTR = 'data-fullyframe-overlay';
+// Sites where the custom page covers the preview iframe; elsewhere it covers the whole page.
+const IFRAME_OVERLAY_HOSTS = ['aemcoder.adobe.io'];
+const OVERLAY_TARGET = IFRAME_OVERLAY_HOSTS.includes(location.hostname) ? 'iframe' : 'page';
 
 let isActive = false;
 let mode = null; // 'fullscreen' | 'overlay'
@@ -52,7 +55,7 @@ function normalizeUrl(value) {
 function getState() {
   let view = null;
   if (isActive) view = mode === 'overlay' ? (overlayVisible ? 'overlay' : 'original') : mode;
-  return { active: isActive, view };
+  return { active: isActive, view, target: OVERLAY_TARGET };
 }
 
 function notifyState() {
@@ -88,6 +91,7 @@ function deactivateFullscreen() {
 }
 
 // --- Overlay mode: custom page placed exactly over the detected iframe ---
+// (on IFRAME_OVERLAY_HOSTS) or over the whole viewport (everywhere else).
 // The overlay is loaded once and then only shown/hidden, so the user can flip
 // between the original iframe and the custom page to compare them.
 // It is inserted right next to the original iframe so it shares its stacking
@@ -101,24 +105,31 @@ const OVERLAY_BASE_CSS =
   'background:#fff!important;box-sizing:border-box!important;';
 const OVERLAY_HIDDEN_CSS = 'visibility:hidden!important;pointer-events:none!important;';
 const OVERLAY_NO_BOX_CSS = OVERLAY_BASE_CSS + 'display:none!important;';
+const PAGE_OVERLAY_CSS =
+  'position:fixed!important;top:0!important;left:0!important;display:block!important;' +
+  'width:100vw!important;height:100vh!important;z-index:2147483647!important;' +
+  'border:none!important;margin:0!important;padding:0!important;' +
+  'max-width:none!important;max-height:none!important;transform:none!important;' +
+  'background:#fff!important;box-sizing:border-box!important;';
 
 let overlayOffset = { left: 0, top: 0 };
 let lastOverlayCss = '';
 
 async function activateOverlay(url) {
-  if (!findIframe()) return false;
+  if (OVERLAY_TARGET === 'iframe' && !findIframe()) return false;
 
   try {
     await chrome.runtime.sendMessage({ type: 'ALLOW_OVERLAY_FRAMING', url });
   } catch {}
 
-  const iframe = findIframe();
-  if (!iframe) {
-    revokeOverlayFraming();
-    return false;
+  if (OVERLAY_TARGET === 'iframe') {
+    const iframe = findIframe();
+    if (!iframe) {
+      revokeOverlayFraming();
+      return false;
+    }
+    setTarget(iframe);
   }
-
-  setTarget(iframe);
   overlayIframe = document.createElement('iframe');
   overlayIframe.setAttribute(OVERLAY_ATTR, '');
   overlayIframe.setAttribute('allow', 'fullscreen; clipboard-read; clipboard-write');
@@ -126,9 +137,16 @@ async function activateOverlay(url) {
   overlayIframe.src = url;
   overlayVisible = true;
   overlayOffset = { left: 0, top: 0 };
-  applyOverlayCss(OVERLAY_NO_BOX_CSS);
-  positionOverlay();
-  trackTarget();
+  if (OVERLAY_TARGET === 'page') {
+    // The page itself is the original: its frame.js runs in the top frame (id 0).
+    frameIds.original = 0;
+    positionOverlay();
+    document.documentElement.appendChild(overlayIframe);
+  } else {
+    applyOverlayCss(OVERLAY_NO_BOX_CSS);
+    positionOverlay();
+    trackTarget();
+  }
   identifyFrames();
   return true;
 }
@@ -155,6 +173,11 @@ function applyOverlayCss(css) {
 
 function positionOverlay() {
   if (!overlayIframe) return;
+
+  if (OVERLAY_TARGET === 'page') {
+    applyOverlayCss(PAGE_OVERLAY_CSS + (overlayVisible ? '' : OVERLAY_HIDDEN_CSS));
+    return;
+  }
 
   if (!targetIframe || !targetIframe.isConnected) {
     // The page may have re-rendered the iframe; pick up its replacement.
@@ -222,7 +245,7 @@ function revokeOverlayFraming() {
   chrome.runtime.sendMessage({ type: 'REVOKE_OVERLAY_FRAMING' }).catch(() => {});
 }
 
-// --- Linking the original iframe and the overlay ---
+// --- Linking the original iframe (or page) and the overlay ---
 // frame.js runs inside both frames; once linked, Alt+click on text in one
 // scrolls the same text in the other. The background relays the messages.
 // To learn each frame's extension frameId we post it an "identify" message;
@@ -325,12 +348,28 @@ document.addEventListener('keydown', (e) => {
   }
 }, true);
 
+// Used by the popup: 'overlay', 'original' (initial page), 'fullscreen' or null (off).
+async function setView(view) {
+  if (view === 'overlay' || view === 'original') {
+    if (!isActive) {
+      if (view === 'original') return;
+      await activate();
+    }
+    if (isActive && mode === 'overlay') setOverlayVisible(view === 'overlay');
+  } else if (view === 'fullscreen') {
+    if (!isActive) await activate();
+  } else if (isActive) {
+    deactivate();
+  }
+}
+
 // --- React to settings changes while active ---
+// Picking another page reloads the overlay with it; deselecting all pages closes it.
 
 chrome.storage.onChanged.addListener(async (changes, area) => {
   if (area !== 'sync' || !isActive || !(OVERLAY_URL_KEY in changes)) return;
   deactivate();
-  await activate();
+  if (normalizeUrl(changes[OVERLAY_URL_KEY].newValue)) await activate();
   notifyState();
 });
 
@@ -347,6 +386,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     } else {
       activate().then(() => sendResponse(getState()));
     }
+    return true;
+  }
+  if (msg.type === 'SET_VIEW') {
+    setView(msg.view).then(() => {
+      sendResponse(getState());
+      notifyState();
+    });
     return true;
   }
   if (msg.type === 'SWITCH_VIEW') {

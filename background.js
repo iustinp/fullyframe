@@ -1,4 +1,8 @@
-chrome.action.onClicked.addListener(async (tab) => {
+// The toolbar button opens popup.html; this shortcut (Alt+Space by default)
+// flips between the initial page and the overlay, or toggles fullscreen when
+// no overlay page is selected.
+chrome.commands.onCommand.addListener(async (command, tab) => {
+  if (command !== 'switch-view' || tab?.id === undefined) return;
   try {
     const response = await chrome.tabs.sendMessage(tab.id, { type: 'TOGGLE' }, { frameId: 0 });
     updateBadge(tab.id, response);
@@ -100,14 +104,22 @@ async function revokeOverlayFraming(tabId) {
   } catch {}
 }
 
+// On aemcoder the overlay is the source page laid over the EDS preview;
+// elsewhere it is any page laid over the initially opened one.
 const BADGES = {
   fullscreen: { text: 'ON', color: '#22c55e' },
-  overlay: { text: 'Src', color: '#8b5cf6' },
-  original: { text: 'EDS', color: '#3b82f6' },
+  overlay: { text: 'Over', color: '#8b5cf6' },
+  original: { text: 'Init', color: '#3b82f6' },
+};
+const IFRAME_BADGES = {
+  ...BADGES,
+  overlay: { ...BADGES.overlay, text: 'Src' },
+  original: { ...BADGES.original, text: 'EDS' },
 };
 
 function updateBadge(tabId, state) {
-  const badge = state?.active && BADGES[state.view];
+  const badges = state?.target === 'iframe' ? IFRAME_BADGES : BADGES;
+  const badge = state?.active && badges[state.view];
   chrome.action.setBadgeText({ tabId, text: badge ? badge.text : '' });
   if (badge) chrome.action.setBadgeBackgroundColor({ tabId, color: badge.color });
 }

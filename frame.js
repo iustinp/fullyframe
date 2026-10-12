@@ -1,8 +1,8 @@
-// Runs in every sub-frame. Stays idle unless the top-frame script links this
-// frame with its counterpart (original iframe <-> overlay). When linked,
-// Alt+click on text scrolls the same text in the other frame to the same height.
+// Runs in every frame. Stays idle unless content.js links this frame with its
+// counterpart (original iframe or page <-> overlay). When linked, Alt+click on
+// text scrolls the same text in the other frame to the same height.
 (() => {
-  if (window.top === window) return;
+  const isTop = window.top === window;
 
   const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'TEXTAREA']);
   const MAX_TEXT = 200;
@@ -224,7 +224,7 @@
 
   // Handshake with the top-frame script so it can learn our frameId.
   window.addEventListener('message', (e) => {
-    if (e.source !== window.parent || e.data?.fullyframe !== 'identify') return;
+    if (isTop || e.source !== window.parent || e.data?.fullyframe !== 'identify') return;
     e.stopImmediatePropagation();
     const { token } = e.data;
     chrome.runtime.sendMessage({ type: 'WHOAMI' })
@@ -234,8 +234,9 @@
       .catch(() => {});
   });
 
+  // In the top frame content.js handles these keys itself.
   window.addEventListener('keydown', (e) => {
-    if (peer === null) return;
+    if (isTop || peer === null) return;
     if (e.key === 'Escape') {
       chrome.runtime.sendMessage({ type: 'FRAME_ESCAPE' }).catch(() => {});
     } else if (e.code === 'Space' && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
