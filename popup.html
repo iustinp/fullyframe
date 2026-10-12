@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>FullyFrame</title>
+  <style>
+    /* Fixed width: popups auto-size to the content, so a viewport-dependent
+       width makes them oscillate as scrollbars toggle. */
+    body { font: 13px system-ui, sans-serif; margin: 0; width: 340px; color: #1f2937; }
+    section { padding: 12px 14px; }
+    section + section { border-top: 1px solid #e5e7eb; }
+    h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: #6b7280; margin: 0 0 10px; }
+    .muted { color: #6b7280; font-size: 12px; margin: 8px 0 0; }
+    .error { color: #dc2626; font-size: 12px; margin: 8px 0 0; }
+    [hidden] { display: none !important; }
+
+    .switch-row { display: flex; align-items: center; gap: 10px; }
+    .switch-row .label { font-weight: 600; color: #9ca3af; }
+    .switch-row .label.on { color: #1f2937; }
+    .switch { position: relative; width: 40px; height: 22px; flex: none; }
+    .switch input { opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; position: absolute; z-index: 1; }
+    .switch .track { position: absolute; inset: 0; border-radius: 11px; background: #3b82f6; transition: background .15s; }
+    .switch .track::after { content: ''; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; }
+    .switch input:checked + .track { background: #8b5cf6; }
+    .switch input:checked + .track::after { transform: translateX(18px); }
+    .switch.plain .track { background: #d1d5db; }
+    .switch.plain input:checked + .track { background: #22c55e; }
+    .switch input:disabled { cursor: default; }
+    .switch input:disabled + .track { opacity: .4; }
+    .switch input:focus-visible + .track { outline: 2px solid #8b5cf6; outline-offset: 2px; }
+
+    form { display: flex; gap: 6px; }
+    input[type=search] { flex: 1; min-width: 0; padding: 6px 8px; font: inherit; border: 1px solid #d1d5db; border-radius: 6px; }
+    button { font: inherit; cursor: pointer; }
+    form button { padding: 6px 12px; border: none; border-radius: 6px; background: #8b5cf6; color: #fff; font-weight: 600; }
+    form button:disabled { background: #ddd6fe; cursor: default; }
+
+    ul { list-style: none; margin: 10px 0 0; padding: 0; max-height: 240px; overflow-y: auto; }
+    li { display: flex; align-items: center; border-radius: 6px; margin-bottom: 4px; border: 1px solid transparent; }
+    li:hover { background: #f3f4f6; }
+    li.active { background: #ede9fe; border-color: #c4b5fd; }
+    li .pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: none; border: none; text-align: left; color: inherit; }
+    li .check { flex: none; width: 14px; height: 14px; border: 1.5px solid #9ca3af; border-radius: 3px; display: grid; place-items: center; font-size: 11px; line-height: 1; color: #fff; }
+    li.active .check { background: #8b5cf6; border-color: #8b5cf6; }
+    li.active .check::after { content: '✓'; }
+    li .url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    li .remove { flex: none; border: none; background: none; color: #9ca3af; font-size: 16px; padding: 4px 10px; }
+    li .remove:hover { color: #dc2626; }
+    kbd { font: 11px ui-monospace, monospace; background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 3px; padding: 0 3px; }
+  </style>
+</head>
+<body>
+  <section id="actions">
+    <h2>View</h2>
+    <div class="switch-row" id="compareRow" hidden>
+      <span class="label" id="initLabel">Initial</span>
+      <label class="switch" title="Switch between the initial page and the overlay page">
+        <input type="checkbox" id="compareSwitch" aria-label="Show overlay page">
+        <span class="track"></span>
+      </label>
+      <span class="label" id="overLabel">Overlay</span>
+    </div>
+    <div class="switch-row" id="fullscreenRow" hidden>
+      <label class="switch plain" title="Make the preview iframe fill the window">
+        <input type="checkbox" id="fullscreenSwitch" aria-label="Fullscreen iframe">
+        <span class="track"></span>
+      </label>
+      <span class="label on">Fullscreen iframe</span>
+    </div>
+    <p class="muted" id="actionHint"></p>
+    <p class="error" id="actionError" hidden></p>
+  </section>
+
+  <section>
+    <h2>Overlay pages</h2>
+    <form id="addForm">
+      <input id="urlInput" type="search" placeholder="Search or add a URL" autocomplete="off" spellcheck="false" autofocus aria-label="Search pages or add a URL">
+      <button type="submit" id="addButton" disabled>Add URL</button>
+    </form>
+    <p class="muted" id="searchHint" hidden></p>
+    <ul id="list"></ul>
+    <p class="muted" id="listHint"></p>
+  </section>
+
+  <section>
+    <p class="muted" id="keysHint" style="margin:0"></p>
+  </section>
+  <script src="popup.js"></script>
+</body>
+</html>

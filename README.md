@@ -1,9 +1,11 @@
 # FullyFrame
 
-A Chrome extension for working with page previews embedded in iframes. It has two modes.
+A Chrome extension for comparing a page with any other page laid exactly on top of it, or for making an embedded preview iframe fullscreen.
 
-- **Fullscreen mode** (default): the toolbar button expands the detected iframe to fill the window.
-- **Overlay mode** (when a custom page URL is set): the toolbar button lays your custom page exactly over the detected iframe, so you can flip between the two to compare them.
+- **Compare mode** (when an overlay page is selected): the overlay page is laid over the initial page (the one you have open) so you can flip between the two.
+  - On `aemcoder.adobe.io` it covers the EDS preview iframe at the same size and position; there the overlay is usually the source page.
+  - On any other site it covers the whole viewport.
+- **Fullscreen mode** (no overlay page selected): the detected iframe expands to fill the window.
 
 The detected iframe is the one titled `Page Preview`, else one whose URL contains `previewToken` or `preview-aemcoder`, else the largest iframe on the page.
 
@@ -15,26 +17,42 @@ The detected iframe is the one titled `Page Preview`, else one whose URL contain
 
 ## Usage
 
-### Fullscreen mode
+Click the toolbar button to open the FullyFrame popup.
 
-Click the toolbar button (or press **Alt+Space**, **⌥ Space** on macOS) to make the iframe fullscreen. Click again or press **Esc** to restore it. The badge shows **ON** while active.
+### Overlay pages
 
-### Overlay mode
+- The input field searches and adds:
+  - Typing filters the saved pages.
+  - If you type a URL that isn't saved yet, **Add URL** becomes available. Clicking it (or pressing **Enter**) saves the page to the list and selects it. `https://` is added if you leave it out.
+  - If only one saved page matches, **Enter** selects it.
+- Click a page in the list to select it (highlighted, with a checkmark). Click it again to deselect it, which switches back to fullscreen mode.
+- Click **×** to remove a page from the list.
 
-1. Open the extension's **Options** and set a custom page URL (http/https).
-2. Click the toolbar button: the custom page is loaded over the iframe, at the same size and position.
-3. Click again, or press **Alt+Space**, to switch between the two pages. Neither page reloads when you switch, and each keeps its own scroll position.
-   - **Src**: the custom page is showing.
-   - **EDS**: the original iframe is showing.
-4. **Alt+click** (⌥+click) any text to align the pages. The same text on the other page is scrolled to the same height. When text appears more than once, the copy with the most similar surrounding text and section heading is chosen.
-5. Press **Esc** to close the overlay.
+Selecting another page while the overlay is open loads that page instead. Deselecting all pages closes the overlay.
 
-The overlay is placed next to the original iframe in the page, so the host page's own dropdowns and menus still show above it.
+### View
 
-To go back to fullscreen mode, clear the URL in Options.
+- **Compare mode:** the **Initial / Overlay** switch flips between the page you opened and the selected overlay page (on aemcoder it reads **EDS / Source**). The first switch to Overlay loads the overlay; after that, neither page reloads when you flip, and each keeps its own scroll position.
+- **Fullscreen mode:** the **Fullscreen iframe** switch turns fullscreen on or off.
+
+The toolbar badge shows what is on screen:
+
+| Badge | Showing | On aemcoder |
+| --- | --- | --- |
+| **Init** | the initial page you opened | **EDS** |
+| **Over** | the selected overlay page | **Src** |
+| **ON** | fullscreen iframe | **ON** |
+
+### Keyboard and mouse
+
+- **Alt+Space** (**⌥ Space** on macOS) flips between the initial and overlay page. With no overlay page selected, it toggles fullscreen.
+- **Alt+click** (⌥+click) any text to align the pages: the same text on the other page is scrolled to the same height. When text appears more than once, the copy with the most similar surrounding text and section heading is chosen.
+- **Esc** closes the overlay or exits fullscreen.
+
+On `aemcoder.adobe.io` the overlay is placed next to the original iframe in the page, so the site's own dropdowns and menus still show above it.
 
 ## Notes
 
-- **Framing headers are removed.** Many sites refuse to be framed (`X-Frame-Options`, CSP `frame-ancestors`). While the overlay is open, the extension removes these response headers, but only for the custom page's host, only in subframes, and only in that tab. The rule is removed when the overlay closes.
-- **Shortcut conflicts.** If **Alt+Space** is taken (for example by Spotlight alternatives such as Alfred or Raycast on macOS), change it at `chrome://extensions/shortcuts`. While the overlay is open, Alt+Space also works directly inside the page and inside both iframes.
+- **Framing headers are removed.** Many sites refuse to be framed (`X-Frame-Options`, CSP `frame-ancestors`). While the overlay is open, the extension removes these response headers, but only for the overlay page's host, only in subframes, and only in that tab. The rule is removed when the overlay closes.
+- **Shortcut conflicts.** If **Alt+Space** is taken (for example by Spotlight alternatives such as Alfred or Raycast on macOS), change it at `chrome://extensions/shortcuts`. While the overlay is open, Alt+Space also works directly inside the page and inside both pages.
 - **Text alignment is approximate.** Alt+click alignment depends on similar text existing on both pages, so it may pick the wrong spot if the surrounding content is very different.
