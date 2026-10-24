@@ -1,11 +1,14 @@
 {
   "manifest_version": 3,
   "name": "FullyFrame",
-  "version": "1.1.0",
+  "version": "1.2.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuqbaBcACZ3h+Mi/6DPB6hn0V9gJXokoITg5pw4XbaKzJILeEMa+ROmWZVS5J4vdgvZeBKkH6CzKl1ReDyzYVZZz+E9ZGEgHJm82UnlW4kTiQnaKKqJHLrF+qRIoG4nN0jVJdwSdDsdftgDCxJE6NoLkfbfKvwhKqs7p1O7aVhy2CP7O4SlP6HPX8vekWrfXRdq8IquPCng8ZxdUJTBeuCdEAMCIlKexj0MCikrf141Sw7jsPnIsVtRXwmagHMpHrasR2twX3ICDnMxxau/lt1NfkWcryZpiBSP057mAE08Cr7Ygp7TftxQBkOboVLmviI3dLR2Bqls+9COk1ImQUWwIDAQAB",
   "description": "Compare a preview with a source page laid over it, or make an embedded preview iframe fullscreen",
   "permissions": [
     "activeTab",
     "storage",
+    "bookmarks",
+    "alarms",
     "declarativeNetRequest"
   ],
   "host_permissions": [
@@ -34,6 +37,7 @@
         "<all_urls>"
       ],
       "js": [
+        "patterns.js",
         "content.js"
       ],
       "run_at": "document_idle"

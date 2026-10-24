@@ -35,17 +35,37 @@
     form button { padding: 6px 12px; border: none; border-radius: 6px; background: #8b5cf6; color: #fff; font-weight: 600; }
     form button:disabled { background: #ddd6fe; cursor: default; }
 
-    ul { list-style: none; margin: 10px 0 0; padding: 0; max-height: 240px; overflow-y: auto; }
-    li { display: flex; align-items: center; border-radius: 6px; margin-bottom: 4px; border: 1px solid transparent; }
+    /* Scrolls horizontally as a whole; every row is as wide as the longest URL,
+       with the checkbox and remove button pinned to the edges. overflow:clip
+       rounds the row corners without breaking the sticky positioning. */
+    .list-scroll { margin-top: 10px; max-height: 240px; overflow: auto; }
+    ul { list-style: none; margin: 0; padding: 0; width: max-content; min-width: 100%; }
+    li { display: flex; align-items: center; border-radius: 6px; margin-bottom: 4px; border: 1px solid transparent; background: #fff; overflow: clip; }
     li:hover { background: #f3f4f6; }
     li.active { background: #ede9fe; border-color: #c4b5fd; }
-    li .pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: none; border: none; text-align: left; color: inherit; }
+    li .pick { flex: 1; display: flex; align-items: center; padding: 6px 8px 6px 0; background: inherit; border: none; text-align: left; color: inherit; }
+    li .lead { position: sticky; left: 0; align-self: stretch; display: flex; align-items: center; padding: 0 8px; background: inherit; }
     li .check { flex: none; width: 14px; height: 14px; border: 1.5px solid #9ca3af; border-radius: 3px; display: grid; place-items: center; font-size: 11px; line-height: 1; color: #fff; }
     li.active .check { background: #8b5cf6; border-color: #8b5cf6; }
     li.active .check::after { content: '✓'; }
-    li .url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    li .remove { flex: none; border: none; background: none; color: #9ca3af; font-size: 16px; padding: 4px 10px; }
+    li .url { white-space: nowrap; }
+    li mark { background: #fde68a; color: inherit; border-radius: 2px; }
+    li .ph { color: #7c3aed; font-weight: 600; }
+    #resolvedHint .resolved-url { color: #1f2937; word-break: break-all; }
+    .help summary { cursor: pointer; }
+    .help p { margin: 6px 0 0; }
+    .help code { font: 11px ui-monospace, monospace; background: #f3f4f6; border-radius: 3px; padding: 0 2px; word-break: break-all; }
+    li .remove { flex: none; position: sticky; right: 0; align-self: stretch; border: none; background: inherit; color: #9ca3af; font-size: 16px; padding: 4px 10px; }
     li .remove:hover { color: #dc2626; }
+    .banner { position: relative; background: #dcfce7; border: 1px solid #86efac; color: #14532d; border-radius: 8px; padding: 10px 12px; }
+    .banner + .banner { margin-top: 8px; }
+    .banner strong { display: block; padding-right: 18px; }
+    .banner ul { width: auto; min-width: 0; list-style: disc; padding-left: 18px; margin: 6px 0 0; }
+    .banner li { display: list-item; background: none; border: none; margin: 2px 0; overflow: visible; }
+    .banner p { margin: 6px 0 0; font-size: 12px; }
+    .banner a { color: #15803d; font-weight: 600; }
+    .banner .dismiss { position: absolute; top: 4px; right: 4px; border: none; background: none; color: #15803d; font-size: 16px; padding: 2px 6px; line-height: 1; }
+    .banner .dismiss:hover { color: #14532d; }
     kbd { font: 11px ui-monospace, monospace; background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 3px; padding: 0 3px; }
   </style>
 </head>
@@ -68,23 +88,43 @@
       <span class="label on">Fullscreen iframe</span>
     </div>
     <p class="muted" id="actionHint"></p>
+    <p class="muted" id="resolvedHint" hidden></p>
     <p class="error" id="actionError" hidden></p>
   </section>
 
   <section>
     <h2>Overlay pages</h2>
     <form id="addForm">
-      <input id="urlInput" type="search" placeholder="Search or add a URL" autocomplete="off" spellcheck="false" autofocus aria-label="Search pages or add a URL">
+      <input id="urlInput" type="search" placeholder="Search or add a URL or pattern" autocomplete="off" spellcheck="false" autofocus aria-label="Search pages or add a URL or pattern">
       <button type="submit" id="addButton" disabled>Add URL</button>
     </form>
     <p class="muted" id="searchHint" hidden></p>
-    <ul id="list"></ul>
+    <div class="list-scroll" id="listScroll"><ul id="list"></ul></div>
     <p class="muted" id="listHint"></p>
+    <details class="muted help">
+      <summary>Patterns: an overlay page that follows the page you're on</summary>
+      <p>Add a URL with placeholders, filled in from the page you're on: <code>{path}</code> is its path, <code>{query}</code> its <code>?query</code> and <code>{hash}</code> its <code>#hash</code>. <code>{-'.html'}</code> removes <code>.html</code> from the end if it's there; <code>{+'.html'}</code> adds it if it's missing.</p>
+      <p>On <code>site.com/en/page.html</code>, <code>main--site--org.aem.page{path}{-'.html'}</code> opens <code>main--site--org.aem.page/en/page</code>, and on that page, <code>site.com{path}{+'.html'}</code> leads back.</p>
+    </details>
   </section>
 
   <section>
     <p class="muted" id="keysHint" style="margin:0"></p>
   </section>
+
+  <section id="notices" hidden>
+    <div class="banner" id="updateBanner" hidden>
+      <strong id="updateTitle"></strong>
+      <ul id="updateChanges"></ul>
+      <p>Get it from <a href="https://github.com/iustinp/fullyframe" target="_blank" rel="noopener">GitHub</a> (<code>git pull</code> or download), then reload FullyFrame in <code>chrome://extensions</code>.</p>
+    </div>
+    <div class="banner" id="whatsNewBanner" hidden>
+      <button class="dismiss" id="whatsNewDismiss" title="Dismiss" aria-label="Dismiss">×</button>
+      <strong id="whatsNewTitle"></strong>
+      <ul id="whatsNewChanges"></ul>
+    </div>
+  </section>
+  <script src="patterns.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

@@ -15,6 +15,14 @@ let overlayVisible = false;
 let linkedFrames = null; // [originalFrameId, overlayFrameId]
 let trackingFrame = null;
 let pendingActivation = null;
+let overlayEntry = null; // the selected URL or pattern the overlay was opened with
+let patternPageUrl = ''; // the page URL the pattern was last filled in from
+let activationError = null; // 'no-iframe' | 'no-url' when activating last failed
+let syncWhenLinked = false; // the overlay got a new page: line it up once linked
+// Lets the overlay page's own scripts lay it out (EDS loads sections after load).
+const OPEN_SYNC_DELAY_MS = 800;
+const OPEN_SYNC_TRIES = 10;
+const SYNC_TIMEOUT_MS = 600;
 
 function findIframe() {
   return document.querySelector(`iframe[title="Page Preview"]:not([${OVERLAY_ATTR}])`)
@@ -33,13 +41,25 @@ function findLargestIframe() {
   });
 }
 
-async function getOverlayUrl() {
+// The selected overlay page: a URL or a URL pattern (see patterns.js).
+async function getOverlayEntry() {
   try {
-    const { [OVERLAY_URL_KEY]: url } = await chrome.storage.sync.get(OVERLAY_URL_KEY);
-    return normalizeUrl(url);
+    const { [OVERLAY_URL_KEY]: entry } = await chrome.storage.sync.get(OVERLAY_URL_KEY);
+    return typeof entry === 'string' && entry.trim() ? entry.trim() : null;
   } catch {
     return null;
   }
+}
+
+// The page patterns are filled in from: the preview iframe's page on
+// IFRAME_OVERLAY_HOSTS, else this page.
+function comparedPageUrl() {
+  if (OVERLAY_TARGET === 'page') return location.href;
+  return (targetIframe?.isConnected ? targetIframe : findIframe())?.src || '';
+}
+
+function overlayUrlFor(entry) {
+  return isPattern(entry) ? resolvePattern(entry, comparedPageUrl()) : normalizeUrl(entry);
 }
 
 function normalizeUrl(value) {
@@ -55,7 +75,14 @@ function normalizeUrl(value) {
 function getState() {
   let view = null;
   if (isActive) view = mode === 'overlay' ? (overlayVisible ? 'overlay' : 'original') : mode;
-  return { active: isActive, view, target: OVERLAY_TARGET };
+  return {
+    active: isActive,
+    view,
+    target: OVERLAY_TARGET,
+    pageUrl: comparedPageUrl(),
+    overlayUrl: overlayIframe ? overlayIframe.src : null,
+    error: activationError,
+  };
 }
 
 function notifyState() {
@@ -64,11 +91,22 @@ function notifyState() {
 
 // --- Fullscreen mode (original behaviour) ---
 
-const FULLSCREEN_CSS =
+// Covers the visible area, but lays the framed page out at the page's own width.
+// Normally 100vw/100vh is the visible area (scrollbars included). In DevTools'
+// device mode, content wider than the device makes Chrome zoom out: the visible
+// area (100% for fixed elements) grows beyond 100vw/100vh, which stay at the
+// device size. The height then follows the visible area, while the width stays
+// at the device width (same breakpoints and zoom as the page) with the rest
+// padded in white.
+const VIEWPORT_BOX_CSS =
   'position:fixed!important;top:0!important;left:0!important;' +
-  'width:100vw!important;height:100vh!important;' +
-  'z-index:2147483647!important;border:none!important;' +
-  'margin:0!important;padding:0!important;background:#fff!important;';
+  'width:max(100%, 100vw)!important;height:max(100%, 100vh)!important;' +
+  'padding:0 max(0px, calc(100% - 100vw)) 0 0!important;' +
+  'box-sizing:border-box!important;max-width:none!important;max-height:none!important;' +
+  'z-index:2147483647!important;border:none!important;margin:0!important;' +
+  'background:#fff!important;';
+
+const FULLSCREEN_CSS = VIEWPORT_BOX_CSS;
 
 function activateFullscreen() {
   const iframe = findIframe();
@@ -105,12 +143,7 @@ const OVERLAY_BASE_CSS =
   'background:#fff!important;box-sizing:border-box!important;';
 const OVERLAY_HIDDEN_CSS = 'visibility:hidden!important;pointer-events:none!important;';
 const OVERLAY_NO_BOX_CSS = OVERLAY_BASE_CSS + 'display:none!important;';
-const PAGE_OVERLAY_CSS =
-  'position:fixed!important;top:0!important;left:0!important;display:block!important;' +
-  'width:100vw!important;height:100vh!important;z-index:2147483647!important;' +
-  'border:none!important;margin:0!important;padding:0!important;' +
-  'max-width:none!important;max-height:none!important;transform:none!important;' +
-  'background:#fff!important;box-sizing:border-box!important;';
+const PAGE_OVERLAY_CSS = VIEWPORT_BOX_CSS + 'display:block!important;transform:none!important;';
 
 let overlayOffset = { left: 0, top: 0 };
 let lastOverlayCss = '';
@@ -135,6 +168,7 @@ async function activateOverlay(url) {
   overlayIframe.setAttribute('allow', 'fullscreen; clipboard-read; clipboard-write');
   overlayIframe.addEventListener('load', identifyFrames);
   overlayIframe.src = url;
+  syncWhenLinked = true;
   overlayVisible = true;
   overlayOffset = { left: 0, top: 0 };
   if (OVERLAY_TARGET === 'page') {
@@ -223,7 +257,23 @@ function positionOverlay() {
 
 function trackTarget() {
   positionOverlay();
+  followComparedPage();
   trackingFrame = requestAnimationFrame(trackTarget);
+}
+
+// With a pattern selected, when the preview iframe moves to another page,
+// load the matching page in the overlay.
+function followComparedPage() {
+  if (!overlayIframe || !targetIframe || !isPattern(overlayEntry)) return;
+  const pageUrl = targetIframe.src;
+  if (!pageUrl || pageUrl === patternPageUrl) return;
+  patternPageUrl = pageUrl;
+  const url = resolvePattern(overlayEntry, pageUrl);
+  if (url && url !== overlayIframe.src) {
+    overlayIframe.src = url;
+    syncWhenLinked = true;
+    notifyState();
+  }
 }
 
 function deactivateOverlay() {
@@ -237,6 +287,7 @@ function deactivateOverlay() {
   overlayIframe?.remove();
   overlayIframe = null;
   overlayVisible = false;
+  syncWhenLinked = false;
   lastOverlayCss = '';
   revokeOverlayFraming();
 }
@@ -246,8 +297,8 @@ function revokeOverlayFraming() {
 }
 
 // --- Linking the original iframe (or page) and the overlay ---
-// frame.js runs inside both frames; once linked, Alt+click on text in one
-// scrolls the same text in the other. The background relays the messages.
+// frame.js runs inside both frames; once linked, switching views keeps the
+// same content in place (see frame.js). The background relays the messages.
 // To learn each frame's extension frameId we post it an "identify" message;
 // its frame.js asks the background for its frameId and posts it back, and we
 // tell the frames apart by the message source window.
@@ -276,11 +327,43 @@ function linkFrames() {
   if (!overlayIframe || frames.some((id) => id < 0)) return;
   linkedFrames = frames;
   chrome.runtime.sendMessage({ type: 'LINK_FRAMES', frames }).catch(() => {});
+  // A newly opened overlay page starts at the content shown on the initial
+  // page. Its own scripts may still be adding content, so try again until
+  // something pairs up.
+  if (syncWhenLinked) {
+    syncWhenLinked = false;
+    const frame = overlayIframe;
+    let tries = 0;
+    const attempt = () => queueFlip(async () => {
+      if (overlayIframe !== frame || !overlayVisible || !linkedFrames) return;
+      const res = await syncFrames(linkedFrames[0], linkedFrames[1]);
+      if (!res?.paired && ++tries < OPEN_SYNC_TRIES) setTimeout(attempt, OPEN_SYNC_DELAY_MS);
+    });
+    setTimeout(attempt, OPEN_SYNC_DELAY_MS);
+  }
+}
+
+// Asks the page being left to put the same content in place on the page about
+// to be shown. Gives up after a while, so a busy page can't block switching.
+// A frame whose last sync paired nothing (e.g. still loading). Normally a
+// page left unscrolled since it was synced isn't synced again, so flipping
+// back returns to the same spot; this frame needs syncing regardless.
+const unsyncedFrames = new Set();
+
+async function syncFrames(from, to) {
+  const res = await Promise.race([
+    chrome.runtime.sendMessage({ type: 'SYNC_FRAMES', from, to, force: unsyncedFrames.has(to) }).catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, SYNC_TIMEOUT_MS)),
+  ]);
+  if (res?.paired) unsyncedFrames.delete(to);
+  else if (!res?.skipped) unsyncedFrames.add(to);
+  return res;
 }
 
 function unlinkFrames() {
   frameIds.original = -1;
   frameIds.overlay = -1;
+  unsyncedFrames.clear();
   if (!linkedFrames) return;
   chrome.runtime.sendMessage({ type: 'UNLINK_FRAMES', frames: linkedFrames }).catch(() => {});
   linkedFrames = null;
@@ -295,12 +378,34 @@ function activate() {
 }
 
 async function doActivate() {
-  const url = await getOverlayUrl();
+  activationError = null;
+  const entry = await getOverlayEntry();
 
-  const ok = url ? await activateOverlay(url) : activateFullscreen();
-  if (!ok) return false;
+  if (!entry) {
+    if (!activateFullscreen()) {
+      activationError = 'no-iframe';
+      return false;
+    }
+    mode = 'fullscreen';
+  } else {
+    if (OVERLAY_TARGET === 'iframe' && !findIframe()) {
+      activationError = 'no-iframe';
+      return false;
+    }
+    const url = overlayUrlFor(entry);
+    if (!url) {
+      activationError = 'no-url';
+      return false;
+    }
+    if (!await activateOverlay(url)) {
+      activationError = 'no-iframe';
+      return false;
+    }
+    overlayEntry = entry;
+    patternPageUrl = comparedPageUrl();
+    mode = 'overlay';
+  }
 
-  mode = url ? 'overlay' : 'fullscreen';
   isActive = true;
   sessionStorage.setItem(SESSION_KEY, '1');
   return true;
@@ -313,6 +418,8 @@ function deactivate() {
   targetIframe = null;
   originalStyle = '';
   mode = null;
+  overlayEntry = null;
+  patternPageUrl = '';
   isActive = false;
   sessionStorage.removeItem(SESSION_KEY);
 }
@@ -328,9 +435,32 @@ function isSwitchKey(e) {
 let lastSwitchAt = 0;
 function switchView() {
   const now = Date.now();
-  if (now - lastSwitchAt < 150) return;
+  if (now - lastSwitchAt < 150) return Promise.resolve();
   lastSwitchAt = now;
-  setOverlayVisible(!overlayVisible);
+  return showOverlay(null);
+}
+
+// Switches run one after another, each after the previous one's sync.
+let flips = Promise.resolve();
+function queueFlip(fn) {
+  const run = flips.then(fn);
+  flips = run.catch(() => {});
+  return run;
+}
+
+// Shows the overlay (true), the initial page (false) or the other one (null),
+// with the content that was in view kept in place.
+function showOverlay(visible) {
+  return queueFlip(async () => {
+    if (!isActive || mode !== 'overlay') return;
+    const next = visible ?? !overlayVisible;
+    if (next === overlayVisible) return;
+    if (linkedFrames) {
+      const [original, overlay] = linkedFrames;
+      await (next ? syncFrames(original, overlay) : syncFrames(overlay, original));
+    }
+    if (isActive && mode === 'overlay') setOverlayVisible(next);
+  });
 }
 
 document.addEventListener('keydown', (e) => {
@@ -341,10 +471,7 @@ document.addEventListener('keydown', (e) => {
   } else if (mode === 'overlay' && isSwitchKey(e)) {
     e.preventDefault();
     e.stopPropagation();
-    if (!e.repeat) {
-      switchView();
-      notifyState();
-    }
+    if (!e.repeat) switchView().then(notifyState);
   }
 }, true);
 
@@ -355,7 +482,7 @@ async function setView(view) {
       if (view === 'original') return;
       await activate();
     }
-    if (isActive && mode === 'overlay') setOverlayVisible(view === 'overlay');
+    await showOverlay(view === 'overlay');
   } else if (view === 'fullscreen') {
     if (!isActive) await activate();
   } else if (isActive) {
@@ -369,7 +496,8 @@ async function setView(view) {
 chrome.storage.onChanged.addListener(async (changes, area) => {
   if (area !== 'sync' || !isActive || !(OVERLAY_URL_KEY in changes)) return;
   deactivate();
-  if (normalizeUrl(changes[OVERLAY_URL_KEY].newValue)) await activate();
+  const entry = changes[OVERLAY_URL_KEY].newValue;
+  if (typeof entry === 'string' && entry.trim()) await activate();
   notifyState();
 });
 
@@ -378,8 +506,7 @@ chrome.storage.onChanged.addListener(async (changes, area) => {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'TOGGLE') {
     if (isActive && mode === 'overlay') {
-      switchView();
-      sendResponse(getState());
+      switchView().then(() => sendResponse(getState()));
     } else if (isActive) {
       deactivate();
       sendResponse(getState());
@@ -396,10 +523,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === 'SWITCH_VIEW') {
-    if (isActive && mode === 'overlay') {
-      switchView();
-      notifyState();
-    }
+    if (isActive && mode === 'overlay') switchView().then(notifyState);
   } else if (msg.type === 'DEACTIVATE') {
     if (isActive) {
       deactivate();

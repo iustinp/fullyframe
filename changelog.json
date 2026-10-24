@@ -1,0 +1,21 @@
+[
+  {
+    "version": "1.2.0",
+    "changes": [
+      "URL patterns: add e.g. main--site--org.aem.page{path}{-'.html'} and the overlay opens the page matching the one you're on.",
+      "Scrolling is synced automatically when you flip: the same content stays under the middle of the screen, or under the spot you clicked. This replaces Alt+click alignment.",
+      "Overlay pages are saved as bookmarks (Other bookmarks › FullyFrame), so they survive removing or reinstalling the extension.",
+      "Update notices: a green ↓ on the icon when a new version is on GitHub, and this list after you update.",
+      "Long URLs in the list scroll sideways, and search scrolls to the match.",
+      "The overlay covers the whole screen in DevTools device mode, even when the page is zoomed out."
+    ]
+  },
+  {
+    "version": "1.1.0",
+    "changes": [
+      "Clicking the icon opens a popup with the view switch and the list of overlay pages.",
+      "Outside aemcoder, the overlay page covers the whole window.",
+      "The input searches the list or adds a new URL."
+    ]
+  }
+]

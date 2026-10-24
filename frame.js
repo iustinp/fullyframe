@@ -1,225 +1,321 @@
 // Runs in every frame. Stays idle unless content.js links this frame with its
-// counterpart (original iframe or page <-> overlay). When linked, Alt+click on
-// text scrolls the same text in the other frame to the same height.
+// counterpart (original iframe or page <-> overlay). When linked, switching
+// views keeps the same content in place: the page being left sends what's on
+// it (anchors) and the spot to keep (the sync point) to the page being shown,
+// which pairs the anchors up with its own and scrolls to match before it's shown.
 (() => {
   const isTop = window.top === window;
 
-  const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'TEXTAREA']);
-  const MAX_TEXT = 200;
+  const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'TEXTAREA', 'SELECT', 'OPTION', 'HEAD']);
+  const MEDIA_TAGS = new Set(['img', 'svg', 'video', 'iframe']);
+  const MAX_ANCHORS = 6000;
+  const MAX_KEY = 80;
+  // A point this close to some text or image moves with it.
+  const NEAR = 150;
   const ACCENT = '#8b5cf6';
 
-  let peer = null;
+  let linked = false;
+  let pin = null; // the sync point, in page coordinates
+  let pinEl = null;
+  // Where the page was when it was last shown by a switch: if it's still
+  // there, switching back returns the other page exactly where it was.
+  let arrived = null;
 
-  const normalize = (s) => s.replace(/\s+/g, ' ').trim();
+  // --- Anchors: text runs and images, in document order ---
 
-  function nodeRect(node) {
+  // Text compared across the two pages: case, accents, punctuation and
+  // spacing often differ between the two versions of a page, so ignore them.
+  const keyOf = (text) => text.toLowerCase().normalize('NFKD')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ').trim().slice(0, MAX_KEY);
+
+  function fileStem(url) {
+    try {
+      const name = new URL(url, location.href).pathname.split('/').filter(Boolean).pop() || '';
+      return name.replace(/\.[a-z\d]+$/i, '');
+    } catch {
+      return '';
+    }
+  }
+
+  function mediaKey(el) {
+    const tag = el.localName;
+    let text = el.getAttribute('aria-label') || el.getAttribute('title') || '';
+    if (tag === 'img') text = el.getAttribute('alt') || text || fileStem(el.currentSrc || el.src);
+    else if (tag === 'svg') {
+      text ||= el.querySelector('title')?.textContent
+        || (el.querySelector('use')?.getAttribute('href') || el.querySelector('use')?.getAttribute('xlink:href') || '').split('#').pop();
+    } else if (tag === 'video') text ||= fileStem(el.currentSrc || el.poster || '');
+    const key = keyOf(text || '');
+    return key ? `${tag === 'svg' ? 'img' : tag}: ${key}` : '';
+  }
+
+  function rectOf(node) {
+    if (node.nodeType === Node.ELEMENT_NODE) return node.getBoundingClientRect();
     const range = document.createRange();
     range.selectNodeContents(node);
     return range.getBoundingClientRect();
   }
 
-  function isCandidate(node) {
-    const parent = node.parentElement;
-    return !!parent && !SKIP_TAGS.has(parent.tagName) && normalize(node.nodeValue).length >= 2;
-  }
-
-  function isVisible(node) {
-    const r = nodeRect(node);
-    return r.width > 0 || r.height > 0;
-  }
-
-  function* textNodes(root) {
-    if (!root) return;
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-      if (isCandidate(n)) yield n;
-    }
-  }
-
-  const CONTEXT_WORDS = 30;
-  const HEADING_SELECTOR = 'h1,h2,h3,h4,h5,h6,[role="heading"]';
-  const words = (s) => s.toLowerCase().split(' ').filter(Boolean);
-
-  // Visible text in document order, with the nearest heading and character offset
-  // of each node, so matches can be compared by their surroundings.
-  function pageText() {
-    const items = [];
-    let offset = 0;
-    let heading = '';
-    for (const node of textNodes(document.body)) {
-      if (!isVisible(node)) continue;
-      const text = normalize(node.nodeValue);
-      const h = node.parentElement.closest(HEADING_SELECTOR);
-      if (h) heading = normalize(h.textContent).toLowerCase().slice(0, MAX_TEXT);
-      items.push({ node, text, heading, offset });
-      offset += text.length + 1;
-    }
-    return { items, length: Math.max(offset, 1) };
-  }
-
-  function contextAt(page, i) {
-    let before = [];
-    for (let j = i - 1; j >= 0 && before.length < CONTEXT_WORDS; j--) {
-      before = words(page.items[j].text).concat(before);
-    }
-    let after = [];
-    for (let j = i + 1; j < page.items.length && after.length < CONTEXT_WORDS; j++) {
-      after = after.concat(words(page.items[j].text));
-    }
-    return {
-      before: before.slice(-CONTEXT_WORDS),
-      after: after.slice(0, CONTEXT_WORDS),
-      heading: page.items[i].heading,
-      pos: page.items[i].offset / page.length,
+  // Keys, nodes and boxes (x, y, width, height in viewport px) of what is
+  // shown on the page. Content that stays put while scrolling (fixed or
+  // sticky headers) says nothing about where the page is scrolled to.
+  function collectAnchors() {
+    const keys = [];
+    const nodes = [];
+    const rects = [];
+    const add = (node, key) => {
+      const r = rectOf(node);
+      if (r.width <= 0 || r.height <= 0) return;
+      keys.push(key);
+      nodes.push(node);
+      rects.push(r.left, r.top, r.width, r.height);
     };
+    const visit = (el, visible) => {
+      for (let n = el.firstChild; n && keys.length < MAX_ANCHORS; n = n.nextSibling) {
+        if (n.nodeType === Node.TEXT_NODE) {
+          if (!visible) continue;
+          const key = keyOf(n.nodeValue);
+          if (key.length >= 2) add(n, key);
+        } else if (n.nodeType === Node.ELEMENT_NODE) {
+          if (SKIP_TAGS.has(n.tagName) || n === pinEl) continue;
+          const style = getComputedStyle(n);
+          if (style.display === 'none' || style.position === 'fixed' || style.position === 'sticky') continue;
+          const shown = style.visibility === 'visible';
+          if (MEDIA_TAGS.has(n.localName)) {
+            const key = shown && mediaKey(n);
+            if (key) add(n, key);
+          } else {
+            visit(n, shown);
+          }
+        }
+      }
+    };
+    if (document.body) visit(document.body, true);
+    return { keys, nodes, rects };
   }
 
-  // Indexes of text nodes matching the anchor, from strictest to loosest match.
-  function findCandidates(page, text, truncated) {
-    const exact = [];
-    const partial = [];
-    const loose = [];
-    const lower = text.toLowerCase();
-    page.items.forEach(({ text: t }, i) => {
-      if (!truncated && t === text) exact.push(i);
-      else if (t.includes(text)) partial.push(i);
-      else if (t.toLowerCase().includes(lower)) loose.push(i);
-    });
-    return exact.length ? exact : partial.length ? partial : loose;
-  }
+  // --- Pairing the anchors of the two pages ---
 
-  const commonRun = (a, b) => {
-    let n = 0;
-    while (n < a.length && n < b.length && a[n] === b[n]) n++;
-    return n;
-  };
-
-  function sharedWords(a, b) {
-    const counts = new Map();
-    for (const w of a) counts.set(w, (counts.get(w) || 0) + 1);
-    let n = 0;
-    for (const w of b) {
-      const c = counts.get(w);
-      if (c) { n++; counts.set(w, c - 1); }
+  // Longest run of pairs [i, j] (sorted by i) whose j also increase.
+  function increasingRun(pairs) {
+    const tails = [];
+    const prev = new Int32Array(pairs.length);
+    for (let k = 0; k < pairs.length; k++) {
+      const j = pairs[k][1];
+      let lo = 0;
+      let hi = tails.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (pairs[tails[mid]][1] < j) lo = mid + 1;
+        else hi = mid;
+      }
+      prev[k] = lo ? tails[lo - 1] : -1;
+      tails[lo] = k;
     }
-    return n;
+    const run = [];
+    for (let k = tails.length ? tails[tails.length - 1] : -1; k >= 0; k = prev[k]) run.push(pairs[k]);
+    return run.reverse();
   }
 
-  // Higher is better: identical neighbouring words weigh most, then shared words
-  // nearby, then the same section heading; page position and occurrence order
-  // only break ties when the surroundings say little.
-  function similarity(anchor, ctx, occurrence) {
-    return 2 * commonRun([...anchor.before].reverse(), [...ctx.before].reverse()) +
-      2 * commonRun(anchor.after, ctx.after) +
-      sharedWords(anchor.before, ctx.before) +
-      sharedWords(anchor.after, ctx.after) +
-      (anchor.heading && anchor.heading === ctx.heading ? 10 : 0) -
-      20 * Math.abs(anchor.pos - ctx.pos) +
-      (occurrence === anchor.index ? 0.5 : 0);
-  }
-
-  function bestMatch(anchor) {
-    const page = pageText();
-    let best = null;
-    let bestScore = -Infinity;
-    findCandidates(page, anchor.text, anchor.truncated).forEach((i, occurrence) => {
-      const score = similarity(anchor, contextAt(page, i), occurrence);
-      if (score > bestScore) { bestScore = score; best = page.items[i].node; }
-    });
-    return best;
-  }
-
-  function textNodeAt(e) {
-    const caret = document.caretRangeFromPoint?.(e.clientX, e.clientY);
-    const node = caret?.startContainer;
-    if (node?.nodeType === Node.TEXT_NODE && isCandidate(node) && e.target.contains(node)) {
-      return node;
-    }
-    // Clicked on padding, an image, etc.: use the nearest text inside or around it.
-    for (let el = e.target; el && el !== document.body; el = el.parentElement) {
-      for (const n of textNodes(el)) {
-        if (isVisible(n)) return n;
+  // Longest common subsequence of two short ranges.
+  function commonSubsequence(a, b, a0, a1, b0, b1, match) {
+    const n = a1 - a0;
+    const m = b1 - b0;
+    const t = new Uint16Array((n + 1) * (m + 1));
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        t[i * (m + 1) + j] = a[a0 + i] === b[b0 + j]
+          ? t[(i + 1) * (m + 1) + j + 1] + 1
+          : Math.max(t[(i + 1) * (m + 1) + j], t[i * (m + 1) + j + 1]);
       }
     }
-    return null;
+    for (let i = 0, j = 0; i < n && j < m;) {
+      if (a[a0 + i] === b[b0 + j]) { match[a0 + i] = b0 + j; i++; j++; }
+      else if (t[(i + 1) * (m + 1) + j] >= t[i * (m + 1) + j + 1]) i++;
+      else j++;
+    }
   }
+
+  // For each key in a, the index of the same content in b (or -1), keeping
+  // the order of both pages. Like a patience diff: content found exactly once
+  // on both sides pairs up first, then the stretches between are aligned the
+  // same way, so repeated texts ("Learn more") pair up within their section.
+  function align(a, b) {
+    const match = new Int32Array(a.length).fill(-1);
+    const todo = [[0, a.length, 0, b.length]];
+    while (todo.length) {
+      let [a0, a1, b0, b1] = todo.pop();
+      while (a0 < a1 && b0 < b1 && a[a0] === b[b0]) match[a0++] = b0++;
+      while (a0 < a1 && b0 < b1 && a[a1 - 1] === b[b1 - 1]) match[--a1] = --b1;
+      if (a0 >= a1 || b0 >= b1) continue;
+
+      const seen = new Map(); // key -> [count in a, index in a, count in b, index in b]
+      for (let i = a0; i < a1; i++) {
+        const s = seen.get(a[i]);
+        if (s) s[0]++;
+        else seen.set(a[i], [1, i, 0, -1]);
+      }
+      for (let j = b0; j < b1; j++) {
+        const s = seen.get(b[j]);
+        if (s) { s[2]++; s[3] = j; }
+      }
+      const pairs = [];
+      for (const s of seen.values()) if (s[0] === 1 && s[2] === 1) pairs.push([s[1], s[3]]);
+      if (!pairs.length) {
+        if ((a1 - a0) * (b1 - b0) <= 40000) commonSubsequence(a, b, a0, a1, b0, b1, match);
+        continue;
+      }
+      pairs.sort((p, q) => p[0] - q[0]);
+      let pa = a0;
+      let pb = b0;
+      for (const [i, j] of increasingRun(pairs)) {
+        match[i] = j;
+        todo.push([pa, i, pb, j]);
+        pa = i + 1;
+        pb = j + 1;
+      }
+      todo.push([pa, a1, pb, b1]);
+    }
+    return match;
+  }
+
+  // Where a point of the other page (viewport px) is on this one: at the same
+  // place within the text or image under it; else moved as the nearest text
+  // or image moved. Returns { x, y, node } or null when nothing pairs up.
+  function mapPoint(x, y, other, match, here) {
+    const R = other.rects;
+    const nearest = (max) => {
+      let best = -1;
+      let bestD = Infinity;
+      let bestArea = Infinity;
+      for (let i = 0; i < match.length; i++) {
+        if (match[i] < 0) continue;
+        const bx = R[i * 4]; const by = R[i * 4 + 1]; const bw = R[i * 4 + 2]; const bh = R[i * 4 + 3];
+        const d = Math.hypot(Math.max(bx - x, 0, x - bx - bw), Math.max(by - y, 0, y - by - bh));
+        if (d > max) continue;
+        const area = bw * bh;
+        if (d < bestD || (d === bestD && area < bestArea)) { best = i; bestD = d; bestArea = area; }
+      }
+      return best < 0 ? null : { i: best, inside: bestD === 0 };
+    };
+    const hit = nearest(NEAR) || nearest(Infinity);
+    if (!hit) return null;
+    const { i, inside } = hit;
+    const j = match[i];
+    const fx = R[i * 4]; const fy = R[i * 4 + 1]; const fw = R[i * 4 + 2]; const fh = R[i * 4 + 3];
+    const tx = here.rects[j * 4]; const ty = here.rects[j * 4 + 1]; const tw = here.rects[j * 4 + 2]; const th = here.rects[j * 4 + 3];
+    const node = here.nodes[j];
+    if (inside) return { x: tx + (x - fx) * (tw / fw), y: ty + (y - fy) * (th / fh), node };
+    return { x: x + tx - fx, y: y + ty - fy, node };
+  }
+
+  // --- Scrolling ---
 
   function scrollParent(el) {
     for (let p = el.parentElement; p; p = p.parentElement) {
-      if (/(auto|scroll|overlay)/.test(getComputedStyle(p).overflowY) &&
-          p.scrollHeight > p.clientHeight) {
+      if (/(auto|scroll|overlay)/.test(getComputedStyle(p).overflowY) && p.scrollHeight > p.clientHeight) {
         return p;
       }
     }
     return document.scrollingElement || document.documentElement;
   }
 
-  // Scroll every relevant container (inner panels first, then the page) until
-  // the node sits at the requested viewport offset.
-  function scrollNodeTo(node, top) {
-    const el = node.parentElement;
-    el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+  // Scroll every container the node is in (inner panels first, then the
+  // page) until its top is at the given viewport offset.
+  function moveNodeTo(node, top) {
     const root = document.scrollingElement || document.documentElement;
-    let container = el;
-    while (container !== root) {
-      const delta = nodeRect(node).top - top;
+    let container = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    while (container && container !== root) {
+      const delta = rectOf(node).top - top;
       if (Math.abs(delta) < 1) break;
       container = scrollParent(container);
       container.scrollBy({ top: delta, behavior: 'instant' });
     }
   }
 
-  function flash(node) {
-    const r = nodeRect(node);
-    const box = document.createElement('div');
-    box.style.cssText =
-      'position:fixed;z-index:2147483647;pointer-events:none;border-radius:3px;' +
-      `outline:2px solid ${ACCENT};background:rgba(139,92,246,.15);transition:opacity .6s;` +
-      `top:${r.top - 3}px;left:${r.left - 3}px;width:${r.width + 6}px;height:${r.height + 6}px;`;
-    document.documentElement.appendChild(box);
-    setTimeout(() => { box.style.opacity = '0'; }, 900);
-    setTimeout(() => box.remove(), 1600);
-  }
+  const viewport = () => ({
+    width: document.documentElement.clientWidth || innerWidth,
+    height: document.documentElement.clientHeight || innerHeight,
+  });
 
-  function toast(message) {
-    const el = document.createElement('div');
-    el.textContent = message;
-    el.style.cssText =
-      'position:fixed;z-index:2147483647;left:50%;bottom:24px;transform:translateX(-50%);' +
-      'padding:8px 14px;border-radius:6px;background:#111;color:#fff;pointer-events:none;' +
-      'font:13px system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.3);';
-    document.documentElement.appendChild(el);
-    setTimeout(() => el.remove(), 2000);
-  }
+  // --- The sync point ---
 
-  window.addEventListener('click', (e) => {
-    if (peer === null || !e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
-    // Alt+click would otherwise download links / trigger page handlers.
-    e.preventDefault();
-    e.stopImmediatePropagation();
-
-    const node = textNodeAt(e);
-    if (!node) {
-      toast('FullyFrame: no text here to sync on');
+  function drawPin() {
+    if (!pin || !linked) {
+      pinEl?.remove();
       return;
     }
-    const full = normalize(node.nodeValue);
-    const text = full.slice(0, MAX_TEXT);
-    const truncated = full.length > MAX_TEXT;
-    const page = pageText();
-    const i = page.items.findIndex((item) => item.node === node);
-    const context = i >= 0
-      ? contextAt(page, i)
-      : { before: [], after: [], heading: '', pos: 0.5 };
-    const index = Math.max(0, findCandidates(page, text, truncated).indexOf(i));
-    flash(node);
-    chrome.runtime.sendMessage({
-      type: 'FRAME_ANCHOR', peer, text, truncated, index, ...context, top: nodeRect(node).top,
-    })
-      .then((res) => {
-        if (!res?.found) toast('FullyFrame: text not found on the other page');
-      })
-      .catch(() => toast('FullyFrame: other page is not reachable'));
+    if (!pinEl) {
+      pinEl = document.createElement('div');
+      pinEl.setAttribute('aria-hidden', 'true');
+    }
+    pinEl.style.cssText =
+      'position:absolute!important;z-index:2147483646!important;pointer-events:none!important;' +
+      'width:12px!important;height:12px!important;margin:-6px 0 0 -6px!important;padding:0!important;' +
+      `border-radius:50%!important;background:${ACCENT}!important;border:2px solid #fff!important;` +
+      'box-shadow:0 0 0 1px rgba(0,0,0,.35),0 1px 4px rgba(0,0,0,.3)!important;box-sizing:border-box!important;' +
+      `left:${pin.x}px!important;top:${pin.y}px!important;`;
+    if (pinEl.parentNode !== document.documentElement) document.documentElement.appendChild(pinEl);
+  }
+
+  function setPin(value) {
+    pin = value;
+    drawPin();
+  }
+
+  const samePin = (a, b) => (!a && !b) || (!!a && !!b && a.x === b.x && a.y === b.y);
+
+  function remember() {
+    arrived = { x: scrollX, y: scrollY, pin: pin && { ...pin } };
+  }
+
+  // The page being left: what's on it, and the spot to keep in place (the
+  // sync point if it's in view, else the middle of the view).
+  function syncOut(force) {
+    if (!force && arrived && arrived.x === scrollX && arrived.y === scrollY && samePin(arrived.pin, pin)) {
+      return { skip: true };
+    }
+    const { width, height } = viewport();
+    const pinView = pin && { x: pin.x - scrollX, y: pin.y - scrollY };
+    const pinInView = !!pinView && pinView.x >= 0 && pinView.x <= width && pinView.y >= 0 && pinView.y <= height;
+    const { keys, rects } = collectAnchors();
+    return {
+      keys,
+      rects,
+      point: pinInView ? pinView : { x: width / 2, y: height / 2 },
+      pin: pinView,
+      pinInView,
+    };
+  }
+
+  // The page being shown: put the same content under the same spot.
+  function syncIn(msg) {
+    if (msg.skip || !Array.isArray(msg.keys)) {
+      remember();
+      return { ok: true, skipped: true };
+    }
+    const here = collectAnchors();
+    const match = align(msg.keys, here.keys);
+    const q = mapPoint(msg.point.x, msg.point.y, msg, match, here);
+    let newPin = null;
+    if (msg.pin && q) {
+      const p = msg.pinInView ? q : mapPoint(msg.pin.x, msg.pin.y, msg, match, here);
+      if (p) newPin = { x: p.x + scrollX, y: p.y + scrollY };
+    }
+    if (q) moveNodeTo(q.node, rectOf(q.node).top + msg.point.y - q.y);
+    setPin(newPin);
+    remember();
+    let paired = 0;
+    for (const j of match) if (j >= 0) paired++;
+    return { ok: true, paired };
+  }
+
+  // Click a spot to keep it in place when switching; click it again to remove it.
+  window.addEventListener('click', (e) => {
+    if (!linked || !e.isTrusted || e.button !== 0 || getSelection()?.toString()) return;
+    const x = e.clientX + scrollX;
+    const y = e.clientY + scrollY;
+    setPin(pin && Math.hypot(pin.x - x, pin.y - y) < 12 ? null : { x, y });
   }, true);
 
   // Handshake with the top-frame script so it can learn our frameId.
@@ -236,7 +332,7 @@
 
   // In the top frame content.js handles these keys itself.
   window.addEventListener('keydown', (e) => {
-    if (isTop || peer === null) return;
+    if (isTop || !linked) return;
     if (e.key === 'Escape') {
       chrome.runtime.sendMessage({ type: 'FRAME_ESCAPE' }).catch(() => {});
     } else if (e.code === 'Space' && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
@@ -250,20 +346,20 @@
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     switch (msg.type) {
       case 'LINK':
-        peer = msg.peer;
+        linked = true;
+        drawPin();
         break;
       case 'UNLINK':
-        peer = null;
+        linked = false;
+        arrived = null;
+        setPin(null);
         break;
-      case 'SCROLL_TO_ANCHOR': {
-        const node = bestMatch(msg);
-        if (node) {
-          scrollNodeTo(node, msg.top);
-          flash(node);
-        }
-        sendResponse({ found: !!node });
+      case 'SYNC_OUT':
+        sendResponse(linked ? syncOut(msg.force) : { skip: true });
         break;
-      }
+      case 'SYNC_IN':
+        sendResponse(linked ? syncIn(msg) : { ok: false });
+        break;
     }
   });
 })();
