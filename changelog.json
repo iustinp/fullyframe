@@ -3,6 +3,7 @@
     "version": "1.2.0",
     "changes": [
       "URL patterns: add e.g. main--site--org.aem.page{path}{-'.html'} and the overlay opens the page matching the one you're on.",
+      "The popup shows which page the overlay will open, and on aemcoder the overlay follows the preview as you navigate.",
       "Scrolling is synced automatically when you flip: the same content stays under the middle of the screen, or under the spot you clicked. This replaces Alt+click alignment.",
       "Overlay pages are saved as bookmarks (Other bookmarks › FullyFrame), so they survive removing or reinstalling the extension.",
       "Update notices: a green ↓ on the icon when a new version is on GitHub, and this list after you update.",
