@@ -358,7 +358,8 @@
         sendResponse(linked ? syncOut(msg.force) : { skip: true });
         break;
       case 'SYNC_IN':
-        sendResponse(linked ? syncIn(msg) : { ok: false });
+        // The page's own URL: it may have moved on from the iframe's src.
+        sendResponse({ ...(linked ? syncIn(msg) : { ok: false }), url: location.href });
         break;
     }
   });

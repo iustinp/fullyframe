@@ -15,7 +15,8 @@ let overlayVisible = false;
 let linkedFrames = null; // [originalFrameId, overlayFrameId]
 let trackingFrame = null;
 let pendingActivation = null;
-let overlayEntry = null; // the selected URL or pattern the overlay was opened with
+let overlayEntries = []; // the selected URLs and patterns the overlay was opened with
+let overlayEntry = null; // the one of them in use
 let patternPageUrl = ''; // the page URL the pattern was last filled in from
 let activationError = null; // 'no-iframe' | 'no-url' when activating last failed
 let syncWhenLinked = false; // the overlay got a new page: line it up once linked
@@ -41,13 +42,13 @@ function findLargestIframe() {
   });
 }
 
-// The selected overlay page: a URL or a URL pattern (see patterns.js).
-async function getOverlayEntry() {
+// The selected overlay pages: URLs and URL patterns (see patterns.js).
+async function getOverlayEntries() {
   try {
-    const { [OVERLAY_URL_KEY]: entry } = await chrome.storage.sync.get(OVERLAY_URL_KEY);
-    return typeof entry === 'string' && entry.trim() ? entry.trim() : null;
+    const { [OVERLAY_URL_KEY]: value } = await chrome.storage.sync.get(OVERLAY_URL_KEY);
+    return selectedEntries(value);
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -56,20 +57,6 @@ async function getOverlayEntry() {
 function comparedPageUrl() {
   if (OVERLAY_TARGET === 'page') return location.href;
   return (targetIframe?.isConnected ? targetIframe : findIframe())?.src || '';
-}
-
-function overlayUrlFor(entry) {
-  return isPattern(entry) ? resolvePattern(entry, comparedPageUrl()) : normalizeUrl(entry);
-}
-
-function normalizeUrl(value) {
-  if (typeof value !== 'string' || !value.trim()) return null;
-  try {
-    const url = new URL(value.trim());
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
-  } catch {
-    return null;
-  }
 }
 
 function getState() {
@@ -81,6 +68,7 @@ function getState() {
     target: OVERLAY_TARGET,
     pageUrl: comparedPageUrl(),
     overlayUrl: overlayIframe ? overlayIframe.src : null,
+    overlayEntry: isActive ? overlayEntry : null,
     error: activationError,
   };
 }
@@ -261,16 +249,19 @@ function trackTarget() {
   trackingFrame = requestAnimationFrame(trackTarget);
 }
 
-// With a pattern selected, when the preview iframe moves to another page,
-// load the matching page in the overlay.
+// With a pattern (or several pages) selected, when the preview iframe moves
+// to another page, load the matching page in the overlay.
 function followComparedPage() {
-  if (!overlayIframe || !targetIframe || !isPattern(overlayEntry)) return;
+  if (!overlayIframe || !targetIframe) return;
+  if (overlayEntries.length < 2 && !overlayEntries.some(isPattern)) return;
   const pageUrl = targetIframe.src;
   if (!pageUrl || pageUrl === patternPageUrl) return;
   patternPageUrl = pageUrl;
-  const url = resolvePattern(overlayEntry, pageUrl);
-  if (url && url !== overlayIframe.src) {
-    overlayIframe.src = url;
+  const pick = pickEntry(overlayEntries, pageUrl);
+  if (pick && pick.url !== overlayIframe.src) {
+    overlayEntry = pick.entry;
+    overlayIframe.src = pick.url;
+    if (overlayVisible) showUrlBadge(pick.url);
     syncWhenLinked = true;
     notifyState();
   }
@@ -379,9 +370,9 @@ function activate() {
 
 async function doActivate() {
   activationError = null;
-  const entry = await getOverlayEntry();
+  const entries = await getOverlayEntries();
 
-  if (!entry) {
+  if (!entries.length) {
     if (!activateFullscreen()) {
       activationError = 'no-iframe';
       return false;
@@ -392,32 +383,36 @@ async function doActivate() {
       activationError = 'no-iframe';
       return false;
     }
-    const url = overlayUrlFor(entry);
-    if (!url) {
+    const pick = pickEntry(entries, comparedPageUrl());
+    if (!pick) {
       activationError = 'no-url';
       return false;
     }
-    if (!await activateOverlay(url)) {
+    if (!await activateOverlay(pick.url)) {
       activationError = 'no-iframe';
       return false;
     }
-    overlayEntry = entry;
+    overlayEntries = entries;
+    overlayEntry = pick.entry;
     patternPageUrl = comparedPageUrl();
     mode = 'overlay';
   }
 
   isActive = true;
   sessionStorage.setItem(SESSION_KEY, '1');
+  if (mode === 'overlay') showUrlBadge(overlayIframe.src);
   return true;
 }
 
 function deactivate() {
+  hideUrlBadge();
   if (mode === 'overlay') deactivateOverlay();
   else if (mode === 'fullscreen') deactivateFullscreen();
 
   targetIframe = null;
   originalStyle = '';
   mode = null;
+  overlayEntries = [];
   overlayEntry = null;
   patternPageUrl = '';
   isActive = false;
@@ -455,12 +450,69 @@ function showOverlay(visible) {
     if (!isActive || mode !== 'overlay') return;
     const next = visible ?? !overlayVisible;
     if (next === overlayVisible) return;
+    let res = null;
     if (linkedFrames) {
       const [original, overlay] = linkedFrames;
-      await (next ? syncFrames(original, overlay) : syncFrames(overlay, original));
+      res = await (next ? syncFrames(original, overlay) : syncFrames(overlay, original));
     }
-    if (isActive && mode === 'overlay') setOverlayVisible(next);
+    if (!isActive || mode !== 'overlay') return;
+    setOverlayVisible(next);
+    showUrlBadge(res?.url || (next ? overlayIframe?.src : comparedPageUrl()));
   });
+}
+
+// --- URL badge: briefly shows which page is in view after a flip ---
+// Shown for 1s at the bottom right of the compared area, then fades out over
+// 1s and is removed from the page. It never takes clicks, and its styles live
+// in a closed shadow root so the page's CSS can't reach in (or out).
+
+const BADGE_SHOW_MS = 1000;
+const BADGE_FADE_MS = 1000;
+let urlBadge = null;
+let urlBadgeTimer = null;
+
+function hideUrlBadge() {
+  clearTimeout(urlBadgeTimer);
+  urlBadge?.remove();
+  urlBadge = null;
+}
+
+function showUrlBadge(url) {
+  hideUrlBadge();
+  if (!url) return;
+  // Bottom right of the preview iframe on aemcoder, else of the window.
+  let right = 0;
+  let bottom = 0;
+  let width = document.documentElement.clientWidth;
+  if (OVERLAY_TARGET === 'iframe' && targetIframe?.isConnected) {
+    const r = targetIframe.getBoundingClientRect();
+    right = Math.max(0, innerWidth - Math.min(r.right, innerWidth));
+    bottom = Math.max(0, innerHeight - Math.min(r.bottom, innerHeight));
+    width = r.width;
+  }
+  const aem = OVERLAY_TARGET === 'iframe';
+  const label = overlayVisible ? (aem ? 'Source' : 'Overlay') : (aem ? 'EDS' : 'Initial');
+
+  const host = document.createElement('fullyframe-badge');
+  host.style.cssText =
+    'all:initial!important;position:fixed!important;z-index:2147483647!important;' +
+    'pointer-events:none!important;display:block!important;' +
+    `right:${right + 12}px!important;bottom:${bottom + 12}px!important;` +
+    `max-width:${Math.max(160, Math.min(560, width - 24))}px!important;`;
+  const shadow = host.attachShadow({ mode: 'closed' });
+  shadow.innerHTML = `<style>
+    .badge { display: flex; align-items: baseline; gap: 8px; padding: 6px 10px; border-radius: 6px;
+      background: rgba(17, 24, 39, .88); color: #fff; box-shadow: 0 2px 8px rgba(0, 0, 0, .3);
+      font: 12px/1.4 system-ui, -apple-system, sans-serif; overflow-wrap: anywhere;
+      animation: fade ${BADGE_FADE_MS}ms ease-in ${BADGE_SHOW_MS}ms forwards; }
+    .label { flex: none; font-weight: 600; color: ${overlayVisible ? '#c4b5fd' : '#d1d5db'}; }
+    @keyframes fade { to { opacity: 0; } }
+  </style><div class="badge"><span class="label"></span><span class="url"></span></div>`;
+  shadow.querySelector('.label').textContent = label;
+  shadow.querySelector('.url').textContent = url;
+  document.documentElement.appendChild(host);
+  urlBadge = host;
+  urlBadgeTimer = setTimeout(hideUrlBadge, BADGE_SHOW_MS + BADGE_FADE_MS);
 }
 
 document.addEventListener('keydown', (e) => {
@@ -491,13 +543,24 @@ async function setView(view) {
 }
 
 // --- React to settings changes while active ---
-// Picking another page reloads the overlay with it; deselecting all pages closes it.
+// Picking another page reloads the overlay with it; deselecting all pages
+// closes it. A change that leaves the overlay on the same page (e.g. also
+// selecting the pattern for this site) keeps it as it is.
 
 chrome.storage.onChanged.addListener(async (changes, area) => {
   if (area !== 'sync' || !isActive || !(OVERLAY_URL_KEY in changes)) return;
+  const entries = selectedEntries(changes[OVERLAY_URL_KEY].newValue);
+  if (mode === 'overlay' && entries.length) {
+    const pick = pickEntry(entries, comparedPageUrl());
+    if (pick && pick.url === overlayIframe?.src) {
+      overlayEntries = entries;
+      overlayEntry = pick.entry;
+      notifyState();
+      return;
+    }
+  }
   deactivate();
-  const entry = changes[OVERLAY_URL_KEY].newValue;
-  if (typeof entry === 'string' && entry.trim()) await activate();
+  if (entries.length) await activate();
   notifyState();
 });
 

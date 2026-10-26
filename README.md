@@ -35,7 +35,9 @@ Click the toolbar button to open the FullyFrame popup.
   - Typing filters the saved pages. Matches are highlighted, and the list scrolls sideways to show the match in the first result. Long URLs can be scrolled horizontally.
   - If you type a URL that isn't saved yet, **Add URL** becomes available. Clicking it (or pressing **Enter**) saves the page to the list and selects it. `https://` is added if you leave it out.
   - If only one saved page matches, **Enter** selects it.
-- Click a page in the list to select it (highlighted, with a checkmark). Click it again to deselect it, which switches back to fullscreen mode.
+- Click a page in the list to select it (highlighted, with a checkmark). Click it again to deselect it. With nothing selected, FullyFrame is in fullscreen mode.
+- The text of a page or pattern can be selected and copied to share it: drag across it, or double-click a word or triple-click the whole entry. This doesn't change which ones are selected.
+- You can select one page or pattern per site. On any page, the overlay opens the selected one that points to a different site, marked **in use** in the list. Selecting a page or pattern for a site that already has one selected replaces it. If none of the selected ones points to a different site, the most recently selected one is used.
 - Click **×** to remove a page from the list.
 - The list is kept in the **Other bookmarks › FullyFrame** bookmarks folder, so it survives removing or reinstalling the extension and syncs with your Chrome profile. You can also edit it there; the popup updates live. Lists saved by older versions move there automatically the first time you open the popup.
 
@@ -52,13 +54,17 @@ Instead of a fixed URL, you can add a pattern that is filled in from the page yo
 | `{hash}` | its `#fragment` (empty if none) |
 | `{-'.html'}` | removes `.html` from the end of what comes before it, if it's there |
 | `{+'.html'}` | adds `.html` to the end of what comes before it, unless it's already there or that ends with `/` |
+| `{-'/content'}{path}` | right before a placeholder, removes `/content` from the start of its value, if it's there |
+| `{+'/content'}{path}` | right before a placeholder, adds `/content` in front of its value, unless it already starts with it |
+
+At the start of a value, only whole words or path segments match: `{-'/content'}` removes it from `/content/us` but leaves `/contentful` alone. For example, `patients.stryker.com{-'/content'}{path}{+'.html'}` turns `/content/us/en/page` into `https://patients.stryker.com/us/en/page.html`.
 
 Quotes are optional (`{-.html}` works too), and `https://` is added if you leave it out. For example, these two patterns compare any page of a site in both directions:
 
 - `main--patients-stryker--aemdemos.aem.page{path}{-'.html'}` – on `https://patients.stryker.com/us/en/ivs/treatments/balloon-kyphoplasty.html` it opens `https://main--patients-stryker--aemdemos.aem.page/us/en/ivs/treatments/balloon-kyphoplasty`.
 - `patients.stryker.com{path}{+'.html'}` – leads back from the `aem.page` site.
 
-With a pattern selected, the popup shows the page it gives for the current one, and warns when that is the same page (select the pattern for the other site). On aemcoder the pattern is filled in from the EDS preview iframe's URL, and when the preview moves to another page, the overlay loads the matching one. On other sites, the overlay follows when you open another page while it's on (it reopens with the matching page).
+Select both, and the overlay opens the matching page on the other site, whichever of the two you're on, with no need to switch patterns. The popup shows the page the overlay opens for the current one, and warns when that is the same page (select a pattern for the other site too). On aemcoder the pattern is filled in from the EDS preview iframe's URL, and when the preview moves to another page, the overlay loads the matching one. On other sites, the overlay follows when you open another page while it's on (it reopens with the matching page).
 
 In the bookmarks folder a pattern is stored with the pattern as its name and the site it points to as its URL.
 
@@ -79,6 +85,7 @@ The toolbar badge shows what is on screen:
 
 - **Alt+Space** (**⌥ Space** on macOS) flips between the initial and overlay page. With no overlay page selected, it toggles fullscreen.
 - **Scrolling is synced automatically.** When you flip, the other page scrolls so the same content sits under the middle of the screen. Flipping back without scrolling returns you exactly where you were. When the overlay opens, it starts at the content shown on the initial page.
+- After each flip, and when the overlay opens, the address of the page now in view shows at the bottom right for a second (labelled **Initial** / **Overlay**, or **EDS** / **Source** on aemcoder), then fades out and is removed. It never blocks clicks.
 - **Click** a spot to make it the sync point (a purple dot): while it's in view, that spot is kept in place when you flip instead of the middle of the screen. Click the dot again to remove it.
 - **Esc** closes the overlay or exits fullscreen.
 

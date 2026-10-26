@@ -1,5 +1,14 @@
 [
   {
+    "version": "1.3.0",
+    "changes": [
+      "Select a pattern for each of two sites and the overlay always opens the other site's page, whichever site you're on. The one in use is marked in the list.",
+      "Patterns can remove or add text at the start of the path too, e.g. site.com{-'/content'}{path}.",
+      "Pages and patterns in the list can be selected and copied, to share them.",
+      "After each flip, the address of the page in view shows briefly at the bottom right, then fades out."
+    ]
+  },
+  {
     "version": "1.2.0",
     "changes": [
       "URL patterns: add e.g. main--site--org.aem.page{path}{-'.html'} and the overlay opens the page matching the one you're on.",

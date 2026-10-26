@@ -43,11 +43,14 @@
     li { display: flex; align-items: center; border-radius: 6px; margin-bottom: 4px; border: 1px solid transparent; background: #fff; overflow: clip; }
     li:hover { background: #f3f4f6; }
     li.active { background: #ede9fe; border-color: #c4b5fd; }
-    li .pick { flex: 1; display: flex; align-items: center; padding: 6px 8px 6px 0; background: inherit; border: none; text-align: left; color: inherit; }
-    li .lead { position: sticky; left: 0; align-self: stretch; display: flex; align-items: center; padding: 0 8px; background: inherit; }
+    li .pick { flex: 1; display: flex; align-items: center; padding: 6px 8px 6px 0; background: inherit; cursor: pointer; outline: none; }
+    li .pick:focus-visible { box-shadow: inset 0 0 0 2px #8b5cf6; border-radius: 6px; }
+    li .url { user-select: text; }
+    li .lead { user-select: none; position: sticky; left: 0; align-self: stretch; display: flex; align-items: center; padding: 0 8px; background: inherit; }
     li .check { flex: none; width: 14px; height: 14px; border: 1.5px solid #9ca3af; border-radius: 3px; display: grid; place-items: center; font-size: 11px; line-height: 1; color: #fff; }
     li.active .check { background: #8b5cf6; border-color: #8b5cf6; }
     li.active .check::after { content: '✓'; }
+    li .tag { flex: none; margin-left: 6px; padding: 0 5px; border-radius: 8px; background: #8b5cf6; color: #fff; font-size: 10px; line-height: 16px; white-space: nowrap; }
     li .url { white-space: nowrap; }
     li mark { background: #fde68a; color: inherit; border-radius: 2px; }
     li .ph { color: #7c3aed; font-weight: 600; }
@@ -103,8 +106,8 @@
     <p class="muted" id="listHint"></p>
     <details class="muted help">
       <summary>Patterns: an overlay page that follows the page you're on</summary>
-      <p>Add a URL with placeholders, filled in from the page you're on: <code>{path}</code> is its path, <code>{query}</code> its <code>?query</code> and <code>{hash}</code> its <code>#hash</code>. <code>{-'.html'}</code> removes <code>.html</code> from the end if it's there; <code>{+'.html'}</code> adds it if it's missing.</p>
-      <p>On <code>site.com/en/page.html</code>, <code>main--site--org.aem.page{path}{-'.html'}</code> opens <code>main--site--org.aem.page/en/page</code>, and on that page, <code>site.com{path}{+'.html'}</code> leads back.</p>
+      <p>Add a URL with placeholders, filled in from the page you're on: <code>{path}</code> is its path, <code>{query}</code> its <code>?query</code> and <code>{hash}</code> its <code>#hash</code>. <code>{-'.html'}</code> removes <code>.html</code> from the end if it's there; <code>{+'.html'}</code> adds it if it's missing. Right before <code>{path}</code> they work on its start: <code>{-'/content'}{path}</code> removes a leading <code>/content</code>, <code>{+'/content'}{path}</code> adds it.</p>
+      <p>On <code>site.com/en/page.html</code>, <code>main--site--org.aem.page{path}{-'.html'}</code> opens <code>main--site--org.aem.page/en/page</code>, and on that page, <code>site.com{path}{+'.html'}</code> leads back. Select both and the overlay always opens the other site's page, whichever site you're on.</p>
     </details>
   </section>
 

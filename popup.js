@@ -25,7 +25,7 @@ let statusPending = true;
 let tabHost = '';
 let tabUrl = '';
 const IFRAME_OVERLAY_HOSTS = ['aemcoder.adobe.io'];
-let settings = { active: '', urls: [] };
+let settings = { selected: [], urls: [] };
 
 // Returns the http(s) URL the text stands for, or null. "example.com/page"
 // is read as https://example.com/page.
@@ -50,11 +50,11 @@ function showError(el, text) {
   el.hidden = !text;
 }
 
-// --- Settings: list of overlay pages and the active one ---
+// --- Settings: list of overlay pages and the selected ones ---
 
 // The list lives in an "Other bookmarks › FullyFrame" folder: Chrome deletes
 // extension storage when the extension is removed, but bookmarks stay (and
-// sync with the profile). Only the active page is kept in extension storage.
+// sync with the profile). Only the selection is kept in extension storage.
 
 const normalize = (url) => {
   try { return new URL(url).href; } catch { return url; }
@@ -98,20 +98,20 @@ async function savedBookmarks() {
 }
 
 // Older versions kept the list in extension storage; move it to bookmarks.
-// The active page is kept in the list too.
+// The selected pages are kept in the list too.
 function migrate(stored) {
   return serial(async () => {
     const old = Array.isArray(stored[LIST_KEY]) ? stored[LIST_KEY] : [];
-    const active = typeof stored[URL_KEY] === 'string' ? stored[URL_KEY] : '';
     const saved = new Set((await savedBookmarks()).map(entryOf));
     const missing = [...new Set(old.map(normalize))].filter((u) => !saved.has(u));
     if (missing.length) {
       const parentId = await bookmarkFolder(true);
       for (const url of missing) await chrome.bookmarks.create({ parentId, title: url, url });
     }
-    if (active && !saved.has(normalizeEntry(active)) && !missing.includes(normalizeEntry(active))) {
-      const parentId = await bookmarkFolder(true);
-      await createEntry(parentId, normalizeEntry(active), 0);
+    for (const entry of selectedEntries(stored[URL_KEY]).map(normalizeEntry)) {
+      if (saved.has(entry) || missing.includes(entry)) continue;
+      await createEntry(await bookmarkFolder(true), entry, 0);
+      saved.add(entry);
     }
     if (LIST_KEY in stored) await chrome.storage.sync.remove(LIST_KEY);
   });
@@ -120,15 +120,30 @@ function migrate(stored) {
 async function loadSettings({ migrate: migrating = false } = {}) {
   const stored = await chrome.storage.sync.get([URL_KEY, LIST_KEY]);
   if (migrating) await migrate(stored);
-  const active = typeof stored[URL_KEY] === 'string' ? stored[URL_KEY] : '';
+  const selected = selectedEntries(stored[URL_KEY]);
   const urls = [...new Set((await savedBookmarks()).map(entryOf))];
-  settings = { active, urls };
+  settings = { selected, urls };
 }
 
-function setActive(url) {
-  return url
-    ? chrome.storage.sync.set({ [URL_KEY]: url })
+function setSelected(entries) {
+  return entries.length
+    ? chrome.storage.sync.set({ [URL_KEY]: entries })
     : chrome.storage.sync.remove(URL_KEY);
+}
+
+// Selects an entry, first in line. Only one entry per site is kept selected,
+// so it replaces a selected entry pointing to the same site.
+function withSelected(entry) {
+  const site = entrySite(entry);
+  return [entry, ...settings.selected.filter((e) => e !== entry && entrySite(e) !== site)];
+}
+
+function select(entry) {
+  return setSelected(withSelected(entry));
+}
+
+function deselect(entry) {
+  return setSelected(settings.selected.filter((e) => e !== entry));
 }
 
 function addUrl(entry) {
@@ -137,7 +152,7 @@ function addUrl(entry) {
     const existing = (await savedBookmarks()).find((b) => entryOf(b) === entry);
     if (existing) await chrome.bookmarks.move(existing.id, { parentId, index: 0 });
     else await createEntry(parentId, entry, 0);
-    await setActive(entry);
+    await select(entry);
   });
 }
 
@@ -146,7 +161,7 @@ function removeUrl(entry) {
     for (const b of await savedBookmarks()) {
       if (entryOf(b) === entry) await chrome.bookmarks.remove(b.id);
     }
-    if (settings.active === entry) await setActive('');
+    if (settings.selected.includes(entry)) await deselect(entry);
   });
 }
 
@@ -225,25 +240,109 @@ function revealMatch(query) {
   listScroll.scrollLeft = (m.left + m.right) / 2 - (left + right) / 2;
 }
 
+function toggleEntry(entry) {
+  return settings.selected.includes(entry) ? deselect(entry) : select(entry);
+}
+
+// A click selects or deselects the entry, but selecting its text (drag,
+// double- or triple-click) to copy it doesn't. The checkmark changes at once
+// and the change is saved a moment later, so the second click of a
+// double-click can undo it before the overlay reloads. The rest of the popup
+// updates once it's saved: changing its layout earlier would move the row
+// from under the second click.
+const CLICK_SETTLE_MS = 300;
+let pendingToggle = null;
+
+function clickEntry(e, entry) {
+  if (e.detail > 1) {
+    if (pendingToggle) {
+      clearTimeout(pendingToggle.timer);
+      settings.selected = pendingToggle.before;
+      pendingToggle = null;
+      markSelected();
+    }
+    return;
+  }
+  const sel = getSelection();
+  if (!sel.isCollapsed && sel.containsNode(e.currentTarget, true)) return;
+  flushToggle();
+  const before = settings.selected;
+  settings.selected = before.includes(entry) ? before.filter((x) => x !== entry) : withSelected(entry);
+  const after = settings.selected;
+  pendingToggle = { before, after, timer: setTimeout(flushToggle, CLICK_SETTLE_MS) };
+  markSelected();
+}
+
+function markSelected() {
+  for (const li of list.children) {
+    const selected = settings.selected.includes(li.dataset.entry);
+    li.classList.toggle('active', selected);
+    li.querySelector('.pick').setAttribute('aria-pressed', String(selected));
+  }
+}
+
+function flushToggle() {
+  if (!pendingToggle) return;
+  clearTimeout(pendingToggle.timer);
+  setSelected(pendingToggle.after);
+  pendingToggle = null;
+}
+// A triple-click selects the whole entry plus a line break; copy just the entry.
+list.addEventListener('copy', (e) => {
+  const text = getSelection().toString();
+  if (text.trim() === text) return;
+  e.preventDefault();
+  e.clipboardData.setData('text/plain', text.trim());
+});
+
+// Closing the popup right after a click still saves it.
+addEventListener('pagehide', flushToggle);
+document.addEventListener('visibilitychange', flushToggle);
+
+// The selected entry the overlay uses (or would use) on this tab.
+function entryInUse() {
+  if (tabState?.active && tabState.overlayEntry) return tabState.overlayEntry;
+  return pickEntry(settings.selected, tabState?.pageUrl ?? tabUrl)?.entry ?? null;
+}
+
 function renderList() {
   const { query, matches } = searchState();
   const scrollLeft = listScroll.scrollLeft;
+  const inUse = settings.selected.length > 1 ? entryInUse() : null;
   list.replaceChildren(...matches.map((url) => {
+    const selected = settings.selected.includes(url);
     const li = document.createElement('li');
-    li.classList.toggle('active', url === settings.active);
+    li.dataset.entry = url;
+    li.classList.toggle('active', selected);
 
-    const pick = document.createElement('button');
+    // Not a <button>, so its text can be selected and copied.
+    const pick = document.createElement('div');
     pick.className = 'pick';
+    pick.tabIndex = 0;
+    pick.setAttribute('role', 'button');
     const kind = isPattern(url) ? 'pattern' : 'page';
-    pick.title = url === settings.active ? `Click to stop using this ${kind}` : `Use this ${kind}`;
-    pick.setAttribute('aria-pressed', String(url === settings.active));
+    pick.title = selected ? `Click to stop using this ${kind}` : `Use this ${kind}`;
+    pick.setAttribute('aria-pressed', String(selected));
     const lead = document.createElement('span');
     lead.className = 'lead';
     const check = document.createElement('span');
     check.className = 'check';
     lead.append(check);
+    if (url === inUse) {
+      const tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = 'in use';
+      tag.title = 'The overlay opens this one on the current page';
+      lead.append(tag);
+    }
     pick.append(lead, urlText(url, query));
-    pick.addEventListener('click', () => setActive(url === settings.active ? '' : url));
+    pick.addEventListener('click', (e) => clickEntry(e, url));
+    pick.addEventListener('keydown', (e) => {
+      if ((e.key === 'Enter' || e.key === ' ') && !e.repeat) {
+        e.preventDefault();
+        toggleEntry(url);
+      }
+    });
 
     const remove = document.createElement('button');
     remove.className = 'remove';
@@ -258,7 +357,7 @@ function renderList() {
   listScroll.scrollLeft = scrollLeft;
   revealMatch(query);
   $('listHint').textContent = settings.urls.length
-    ? 'Click a page or pattern to use it, click it again to stop. With none selected, FullyFrame makes the preview iframe fullscreen.'
+    ? 'Click a page or pattern to use it, click it again to stop. Select one for each of two sites (e.g. two patterns) and the overlay opens the one for the other site. With none selected, FullyFrame makes the preview iframe fullscreen.'
     : 'Add a page or pattern to compare against. With none selected, FullyFrame makes the preview iframe fullscreen.';
 }
 
@@ -267,7 +366,7 @@ function renderList() {
 function renderActions() {
   const reachable = tabState !== null;
   const pending = statusPending && !reachable;
-  const comparing = !!settings.active;
+  const comparing = settings.selected.length > 0;
   compareRow.hidden = !comparing;
   fullscreenRow.hidden = comparing;
   compareSwitch.disabled = fullscreenSwitch.disabled = !reachable;
@@ -294,28 +393,34 @@ function renderActions() {
     actionHint.textContent = 'No overlay page selected.';
   }
   renderResolved();
+  if (settings.selected.length > 1) renderList(); // the entry in use may have changed
 }
 
-// For a selected pattern, the page it gives for this one.
+// With a pattern or several pages selected, the page the overlay opens for this one.
 function renderResolved() {
   const el = $('resolvedHint');
-  const pattern = isPattern(settings.active) ? settings.active : null;
-  // On aemcoder the pattern is filled in from the preview iframe's page,
+  const { selected } = settings;
+  // On aemcoder patterns are filled in from the preview iframe's page,
   // which only the page can tell.
   const pageUrl = tabState?.pageUrl ?? tabUrl;
-  el.hidden = !pattern || (statusPending && !tabState);
+  el.hidden = !(selected.length > 1 || selected.some(isPattern)) || (statusPending && !tabState);
   if (el.hidden) return;
-  const url = (tabState?.active && tabState.overlayUrl) || resolvePattern(pattern, pageUrl);
+  const url = (tabState?.active && tabState.overlayUrl) || pickEntry(selected, pageUrl)?.url;
   if (!url) {
-    el.textContent = pageUrl ? 'The selected pattern gives no page for this one.' : 'No preview iframe found to fill the pattern in from.';
+    el.textContent = pageUrl ? noUrlMessage() : 'No preview iframe found to fill the pattern in from.';
   } else if (url === normalize(pageUrl)) {
-    el.textContent = 'The selected pattern gives this same page. Select the pattern for the other site.';
+    el.textContent = 'The overlay would show this same page. Also select a pattern for the other site.';
   } else {
     const link = document.createElement('span');
     link.className = 'resolved-url';
     link.textContent = url;
     el.replaceChildren('Overlay page: ', link);
   }
+}
+
+function noUrlMessage() {
+  return settings.selected.length > 1 ? 'None of the selected patterns gives a page for this one.'
+    : 'The selected pattern gives no page for this one.';
 }
 
 async function sendView(view) {
@@ -326,8 +431,8 @@ async function sendView(view) {
     tabState = null;
   }
   if (tabState && view && !tabState.active) {
-    showError(actionError, tabState.error === 'no-url' ? 'The selected pattern gives no page for this one.'
-      : settings.active ? 'No preview iframe found on this page.' : 'No iframe found on this page.');
+    showError(actionError, tabState.error === 'no-url' ? noUrlMessage()
+      : settings.selected.length ? 'No preview iframe found on this page.' : 'No iframe found on this page.');
   }
   renderActions();
 }
@@ -341,7 +446,7 @@ async function submitSearch() {
   if (addable) {
     await addUrl(url);
   } else if (matches.length === 1) {
-    await setActive(matches[0]);
+    await select(matches[0]);
   } else {
     return;
   }

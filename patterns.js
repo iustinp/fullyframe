@@ -8,6 +8,12 @@
 //   {+'x'}   adds x to the end of what comes before it, unless it's already
 //            there or that ends with "/"
 //
+// Right before a placeholder (and not right after another one), they work on
+// the start of its value instead: {-'/content'}{path} removes a leading
+// /content, {+'/en'}{path} adds /en in front unless the path starts with it.
+// A word or path segment is only matched whole, so {-'/content'} leaves
+// /contentful alone.
+//
 // Quotes around x are optional. Loaded by both the popup and content.js.
 
 const PATTERN_PLACEHOLDERS = ['path', 'query', 'hash'];
@@ -54,26 +60,52 @@ function resolvePattern(pattern, pageUrl) {
   }
   const values = { path: page.pathname, query: page.search, hash: page.hash };
   let out = '';
-  for (const part of parts) {
+  let leading = []; // edits for the start of the next placeholder's value
+  parts.forEach((part, i) => {
     if (part.text !== undefined) {
       out += part.text;
     } else if (part.placeholder) {
       let value = values[part.placeholder];
+      for (const edit of leading) value = editStart(value, edit);
+      leading = [];
       // "https://host/{path}" shouldn't give a double slash.
       if (part.placeholder === 'path' && out.endsWith('/')) value = value.replace(/^\/+/, '');
       out += value;
+    } else if (editsStart(parts, i)) {
+      leading.push(part);
     } else if (part.edit === '-') {
       if (out.endsWith(part.value)) out = out.slice(0, -part.value.length);
     } else if (!out.endsWith(part.value) && !out.endsWith('/')) {
       out += part.value;
     }
-  }
+  });
   try {
     const url = new URL(out);
     return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
   } catch {
     return null;
   }
+}
+
+// Whether the edit at parts[i] works on the start of the placeholder after it:
+// past any neighbouring edits, a placeholder follows and none precedes.
+function editsStart(parts, i) {
+  let before = i - 1;
+  while (before >= 0 && parts[before].edit) before--;
+  let after = i + 1;
+  while (after < parts.length && parts[after].edit) after++;
+  return !parts[before]?.placeholder && !!parts[after]?.placeholder;
+}
+
+// Whether value starts with text, as a whole word or path segment.
+function startsWhole(value, text) {
+  return value.startsWith(text) && !(/[\w-]$/.test(text) && /^[\w-]/.test(value.slice(text.length)));
+}
+
+function editStart(value, { edit, value: text }) {
+  if (edit === '-') return startsWhole(value, text) ? value.slice(text.length) : value;
+  if (startsWhole(value, text)) return value;
+  return text.endsWith('/') && value.startsWith('/') ? text + value.slice(1) : text + value;
 }
 
 // Checks text typed as a pattern. Returns { pattern } (with https:// added
@@ -107,4 +139,56 @@ function patternHome(pattern) {
   } catch {
     return null;
   }
+}
+
+// --- Several selected entries ---
+//
+// Any number of URLs and patterns can be selected, one per site: on a given
+// page the overlay opens the first selected entry that points to a site other
+// than the page's own. So selecting a pattern for each of two sites compares
+// any page of either site against its match on the other.
+
+// The site ("host[:port]") an entry points to, or ''.
+function entrySite(entry) {
+  try {
+    return new URL(isPattern(entry) ? patternHome(entry) : entry).host;
+  } catch {
+    return '';
+  }
+}
+
+// The selected entries, most recently selected first. Older versions stored
+// a single string.
+function selectedEntries(value) {
+  const list = Array.isArray(value) ? value : [value];
+  return [...new Set(list.filter((e) => typeof e === 'string' && e.trim()).map((e) => e.trim()))];
+}
+
+// The page an entry gives for the page at pageUrl, or null.
+function entryUrl(entry, pageUrl) {
+  if (isPattern(entry)) return resolvePattern(entry, pageUrl);
+  try {
+    const url = new URL(entry);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+// The entry to use on pageUrl and the page it gives ({ entry, url }), or
+// null when none gives a page. Prefers an entry on another site; if all are
+// on the page's own site, the first one is used.
+function pickEntry(entries, pageUrl) {
+  let host = '';
+  try {
+    host = new URL(pageUrl).host;
+  } catch {}
+  let fallback = null;
+  for (const entry of entries) {
+    const url = entryUrl(entry, pageUrl);
+    if (!url) continue;
+    if (new URL(url).host !== host) return { entry, url };
+    fallback ??= { entry, url };
+  }
+  return fallback;
 }
